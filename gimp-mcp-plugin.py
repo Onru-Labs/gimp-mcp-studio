@@ -1663,45 +1663,38 @@ class MCPPlugin(Gimp.PlugIn):
                     pass
 
     def _apply_gegl_filter(self, image, drawable, op_name, props):
-        """Apply a GEGL operation to a drawable via gimp-drawable-filter-new."""
-        pdb = Gimp.get_pdb()
-        # Try the GEGL filter approach via PDB
-        filter_proc = pdb.lookup_procedure("gimp-drawable-filter-new")
-        if filter_proc:
-            cfg = filter_proc.create_config()
-            cfg.set_property("drawable", drawable)
-            cfg.set_property("operation-name", op_name)
-            cfg.set_property("name", op_name)
-            result = filter_proc.run(cfg)
-            # Get the filter object
+        """Configure the native operation before merging; never hide a failed edit."""
+        filtr = Gimp.DrawableFilter.new(drawable, op_name, op_name)
+        if filtr is None:
+            raise RuntimeError(f"Could not create GEGL filter: {op_name}")
+        try:
+            config = filtr.get_config()
+            specs = {spec.name: spec for spec in config.list_properties()}
+            unknown = sorted(set(props) - set(specs))
+            if unknown:
+                raise ValueError("Unsupported GEGL properties: " + ", ".join(unknown))
+            for key, value in props.items():
+                spec = specs[key]
+                if isinstance(value, (int, float)):
+                    if not math.isfinite(value):
+                        raise ValueError(f"Non-finite GEGL property: {key}")
+                    if value < getattr(spec, "minimum", -math.inf) or value > getattr(spec, "maximum", math.inf):
+                        raise ValueError(f"Out-of-range GEGL property: {key}")
+                config.set_property(key, value)
+                actual = config.get_property(key)
+                matches = (math.isclose(actual, value, rel_tol=1e-6, abs_tol=1e-9)
+                           if isinstance(actual, (int, float)) and isinstance(value, (int, float))
+                           else actual == value)
+                if not matches:
+                    raise RuntimeError(f"GEGL property was not applied: {key}")
+            filtr.update()
+            drawable.merge_filter(filtr)
+        except Exception:
             try:
-                filtr = result.index(0)
-                for k, v in props.items():
-                    try:
-                        filtr.set_property(k, v)
-                    except Exception:
-                        pass
-                # Apply filter (merge)
-                apply_proc = pdb.lookup_procedure("gimp-drawable-merge-filter")
-                if apply_proc:
-                    acfg = apply_proc.create_config()
-                    acfg.set_property("drawable", drawable)
-                    acfg.set_property("filter", filtr)
-                    apply_proc.run(acfg)
+                filtr.delete()
             except Exception:
                 pass
-        else:
-            # Fallback: execute via exec context
-            props_code = ", ".join(f'"{k}", {repr(v)}' for k, v in props.items())
-            cmds = [
-                "from gi.repository import Gimp, Gegl",
-                "_img = Gimp.get_images()[0]",
-                "_d = (_img.get_selected_layers() or _img.get_layers() or [None])[0]",
-                f"_d.apply_drawable_filter_new('{op_name}', '', [{props_code}])",
-                "Gimp.displays_flush()",
-            ]
-            for cmd in cmds:
-                exec(cmd, self.context)
+            raise
 
     # =========================================================================
     # CATEGORY 1 — File Operations
