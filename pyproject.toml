@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gimp-mcp-studio"
+version = "0.1.0"
+description = "GIMP 3 MCP bridge with persistent editing, PDB and GEGL discovery"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+dependencies = ["mcp>=2.0,<3"]
+
+[project.scripts]
+gimp-mcp-studio = "gimp_mcp_server:main"
+
+[tool.setuptools]
+py-modules = ["gimp_mcp_server"]
+
+[tool.setuptools.data-files]
+"share/gimp-mcp-studio" = ["gimp-mcp-plugin.py", "install-plugin.ps1", "batch-start.py", "NOTICE"]
