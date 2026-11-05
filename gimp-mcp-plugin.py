@@ -363,6 +363,8 @@ class MCPPlugin(Gimp.PlugIn):
             # ── Category 5: Layer Operations ──────────────────────────────────
             elif "type" in j and j["type"] == "create_layer":
                 return self._create_layer(j.get("params", {}))
+            elif "type" in j and j["type"] == "import_layer":
+                return self._import_layer(j.get("params", {}))
             elif "type" in j and j["type"] == "duplicate_layer":
                 return self._duplicate_layer(j.get("params", {}))
             elif "type" in j and j["type"] == "delete_layer":
@@ -2328,6 +2330,48 @@ class MCPPlugin(Gimp.PlugIn):
         except Exception as e:
             return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
+    def _import_layer(self, params):
+        """Load a local asset into the selected existing image, never a new image."""
+        try:
+            from gi.repository import Gio
+            image = self._get_image(int(params.get("image_index", 0)))
+            file_path = os.path.abspath(os.fspath(params["file_path"]))
+            if not os.path.isfile(file_path):
+                raise ValueError("Import source must be an existing local file")
+            position = int(params.get("position", 0))
+            if position < 0 or position > len(image.get_layers()):
+                raise ValueError("position must be a valid top-to-bottom layer insertion index")
+            image.undo_group_start()
+            try:
+                layer = Gimp.file_load_layer(Gimp.RunMode.NONINTERACTIVE, image,
+                                             Gio.File.new_for_path(file_path))
+                if layer is None:
+                    raise RuntimeError("GIMP did not load the asset as a layer")
+                if image.insert_layer(layer, None, position) is False:
+                    raise RuntimeError("GIMP refused to insert the imported layer")
+                if params.get("name") is not None:
+                    if layer.set_name(str(params["name"])) is False:
+                        raise RuntimeError("GIMP refused the requested layer name")
+                x, y = int(params.get("x", 0)), int(params.get("y", 0))
+                if layer.set_offsets(x, y) is False:
+                    raise RuntimeError("GIMP refused the requested layer offsets")
+                offsets = layer.get_offsets()
+                actual_x, actual_y = int(offsets[-2]), int(offsets[-1])
+                if (actual_x, actual_y) != (x, y):
+                    raise RuntimeError("Imported layer offset readback differs from the request")
+            finally:
+                image.undo_group_end()
+            Gimp.displays_flush()
+            return {"status": "success", "results": {
+                "file_path": file_path, "image_id": image.get_id(),
+                "layer_id": layer.get_id(), "layer_name": layer.get_name(),
+                "width": layer.get_width(), "height": layer.get_height(),
+                "bounds": {"x": actual_x, "y": actual_y,
+                           "width": layer.get_width(), "height": layer.get_height()},
+                "position": image.get_item_position(layer)}}
+        except Exception as error:
+            return {"status": "error", "error": str(error), "traceback": traceback.format_exc()}
+
     def _duplicate_layer(self, params):
         """Duplicate a layer."""
         try:
@@ -2463,29 +2507,67 @@ class MCPPlugin(Gimp.PlugIn):
         except Exception as e:
             return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
-    def _list_layers(self, params):
-        """List all layers with properties."""
+    def _layer_semantics(self, layer):
+        """Inspect native objects; named raster layers do not become text objects."""
+        native_class = getattr(getattr(layer, "__gtype__", None), "name", type(layer).__name__)
+        is_text = isinstance(layer, Gimp.TextLayer)
+        vector_type = getattr(Gimp, "VectorLayer", None)
+        is_vector = vector_type is not None and isinstance(layer, vector_type)
+        result = {"native_class": native_class, "is_text_layer": is_text,
+                  "is_vector_layer": is_vector, "semantic_type":
+                  "text" if is_text else "vector" if is_vector else "raster"}
+        errors = []
+        if is_text:
+            try:
+                result["text"] = self._text_state(layer)
+            except Exception as exc:
+                errors.append("text: " + str(exc))
         try:
-            image  = self._get_image(int(params.get("image_index", 0)))
-            layers = image.get_layers()
+            mask = layer.get_mask()
+            result["has_mask"] = mask is not None
+            result["mask"] = ({"id": mask.get_id(), "name": mask.get_name(),
+                               "native_class": type(mask).__name__} if mask is not None else None)
+        except Exception as exc:
+            errors.append("mask: " + str(exc))
+        if is_vector:
+            try:
+                path = layer.get_path()
+                result["vector_path"] = {"id": path.get_id(), "name": path.get_name()} if path else None
+            except Exception as exc:
+                errors.append("vector_path: " + str(exc))
+        if errors:
+            result["inspection_errors"] = errors
+        return result
+
+    def _list_layers(self, params):
+        """List layers with compatibility fields and native editability metadata."""
+        try:
+            image = self._get_image(int(params.get("image_index", 0)))
             layer_list = []
-            for i, layer in enumerate(layers):
+            def inspect(layer, index):
+                item = {"index": index, "name": layer.get_name(), "id": layer.get_id(),
+                        "visible": layer.get_visible(), "opacity": layer.get_opacity(),
+                        "blend_mode": str(layer.get_mode()), "width": layer.get_width(),
+                        "height": layer.get_height(), "has_alpha": layer.has_alpha(),
+                        "offsets": list(layer.get_offsets())}
+                item.update(self._layer_semantics(layer))
+                if hasattr(layer, "is_group") and layer.is_group():
+                    item["semantic_type"] = "group"
+                    item["children"] = [inspect(child, j) for j, child in enumerate(layer.get_children())]
+                return item
+            for i, layer in enumerate(image.get_layers()):
                 try:
-                    layer_list.append({
-                        "index":      i,
-                        "name":       layer.get_name(),
-                        "id":         layer.get_id(),
-                        "visible":    layer.get_visible(),
-                        "opacity":    layer.get_opacity(),
-                        "blend_mode": str(layer.get_mode()),
-                        "width":      layer.get_width(),
-                        "height":     layer.get_height(),
-                        "has_alpha":  layer.has_alpha(),
-                        "offsets":    list(layer.get_offsets()),
-                    })
+                    layer_list.append(inspect(layer, i))
                 except Exception as ex:
                     layer_list.append({"index": i, "error": str(ex)})
-            return {"status": "success", "results": {"layers": layer_list, "count": len(layer_list)}}
+            results = {"layers": layer_list, "count": len(layer_list)}
+            if hasattr(image, "get_paths"):
+                try:
+                    results["paths"] = [{"id": path.get_id(), "name": path.get_name(),
+                                         "native_class": type(path).__name__} for path in image.get_paths()]
+                except Exception as exc:
+                    results["path_inspection_error"] = str(exc)
+            return {"status": "success", "results": results}
         except Exception as e:
             return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
@@ -3050,42 +3132,99 @@ class MCPPlugin(Gimp.PlugIn):
         flist = list(raw[1]) if isinstance(raw, tuple) and len(raw) > 1 else list(raw)
         return flist[0] if flist else None
 
-    def _create_text_layer_native(self, image, text, font_obj, size, x, y, color_str):
-        """Create a text layer via Gimp.TextLayer.new."""
+    def _text_offsets(self, layer):
+        """GI can expose gboolean + two out parameters, or just the two values."""
+        offsets = tuple(layer.get_offsets())
+        if len(offsets) == 3:
+            success, x, y = offsets
+            if not success:
+                raise RuntimeError("Native text offset readback failed")
+        elif len(offsets) == 2:
+            x, y = offsets
+        else:
+            raise RuntimeError("Unexpected native offset result: " + repr(offsets))
+        return [int(x), int(y)]
+
+    def _text_state(self, layer):
+        font_size, unit = layer.get_font_size()
+        return {"text": layer.get_text(), "font": layer.get_font().get_name(),
+                "size": float(font_size), "unit_id": unit.get_id(),
+                "color_rgba": list(layer.get_color().get_rgba()),
+                "position": self._text_offsets(layer)}
+
+    def _apply_native_text(self, layer, params):
+        """Check native setter status AND property readback, never substitute PDB success."""
         from gi.repository import Gegl
-        if not hasattr(Gimp, "TextLayer"):
-            return None
+        if not isinstance(layer, Gimp.TextLayer):
+            raise ValueError("Target is not a native Gimp.TextLayer; raster text cannot be edited semantically")
+        expected = {}
+        font_report = None
+        operations = []
+        if params.get("text") is not None:
+            expected["text"] = str(params["text"])
+            operations.append(("text", layer.set_text, (expected["text"],)))
+        if params.get("font") is not None:
+            requested = str(params["font"])
+            font = self._resolve_font(requested)
+            if font is None:
+                raise ValueError("Font could not be resolved: " + requested)
+            resolved = font.get_name()
+            font_report = {"requested": requested, "resolved": resolved,
+                           "fallback_used": resolved.casefold() != requested.casefold()}
+            expected["font"] = resolved
+            operations.append(("font", layer.set_font, (font,)))
+        if params.get("size") is not None:
+            size = float(params["size"])
+            if not math.isfinite(size) or size <= 0:
+                raise ValueError("Text size must be finite and positive")
+            unit = Gimp.Unit.pixel()
+            expected.update(size=size, unit_id=unit.get_id())
+            operations.append(("size", layer.set_font_size, (size, unit)))
+        if params.get("color") is not None:
+            color = Gegl.Color.new(str(params["color"]))
+            expected["color_rgba"] = list(color.get_rgba())
+            operations.append(("color", layer.set_color, (color,)))
+        for name, setter, args in operations:
+            if not setter(*args):
+                raise RuntimeError("Native text setter failed: " + name)
+        actual = self._text_state(layer)
+        for key, value in expected.items():
+            observed = actual[key]
+            matches = (all(abs(a-b) < 0.002 for a, b in zip(observed, value))
+                       if key == "color_rgba" else
+                       math.isclose(observed, value, rel_tol=1e-6, abs_tol=1e-6)
+                       if key == "size" else observed == value)
+            if not matches:
+                raise RuntimeError("Native text readback mismatch for " + key + ": " + repr(observed))
+        return {"actual": actual, "font_resolution": font_report,
+                "verified_properties": list(expected)}
 
-        try:
-            tl = Gimp.TextLayer.new(image, text, font_obj, float(size), Gimp.Unit.pixel())
-        except Exception:
-            return None
+    def _create_text_layer_native(self, image, text, font_obj, size, x, y, color_str):
+        """Create native text, removing partial creation on setup/readback failure."""
+        tl = Gimp.TextLayer.new(image, text, font_obj, float(size), Gimp.Unit.pixel())
         if tl is None:
-            return None
-
+            raise RuntimeError("Gimp.TextLayer.new returned no layer")
+        inserted = False
         try:
-            image.insert_layer(tl, None, 0)
+            if image.insert_layer(tl, None, 0) is False:
+                raise RuntimeError("Could not insert native text layer")
+            inserted = True
+            if tl.set_offsets(x, y) is False:
+                raise RuntimeError("Could not position native text layer")
+            self._apply_native_text(tl, {"text": text, "size": size, "color": color_str})
+            actual = self._text_state(tl)
+            expected = {"font": font_obj.get_name(), "position": [x, y]}
+            observed = {key: actual[key] for key in expected}
+            if observed != expected:
+                error = RuntimeError("Native text creation readback mismatch: expected " +
+                                     repr(expected) + "; observed " + repr(observed))
+                error.readback_mismatch = {"expected": expected, "observed": observed}
+                raise error
+            return tl
         except Exception:
-            return None
-
-        # Layer is now in the image; swallow offset/color failures so the
-        # caller does not fall through to the PDB fallback and insert a
-        # second layer.
-        try:
-            tl.set_offsets(x, y)
-        except Exception:
-            pass
-        try:
-            pdb   = Gimp.get_pdb()
-            cproc = pdb.lookup_procedure("gimp-text-layer-set-color")
-            if cproc:
-                ccfg = cproc.create_config()
-                ccfg.set_property("layer", tl)
-                ccfg.set_property("color", Gegl.Color.new(color_str))
-                cproc.run(ccfg)
-        except Exception:
-            pass
-        return tl
+            if inserted:
+                image.remove_layer(tl)
+            raise
 
     def _create_text_layer_pdb(self, image, text, font_obj, size, x, y):
         """Create a text layer via the gimp-text-font PDB procedure."""
@@ -3112,110 +3251,65 @@ class MCPPlugin(Gimp.PlugIn):
         return None
 
     def _add_text(self, params):
-        """Add a text layer."""
+        """Add verified native text; font substitution is explicitly reported."""
         try:
-            from gi.repository import Gegl
-            image_index = int(params.get("image_index", 0))
-            text_str    = params.get("text", "")
-            x           = int(params.get("x", 0))
-            y           = int(params.get("y", 0))
-            font        = params.get("font", "Sans")
-            size        = int(params.get("size", 24))
-            color_str   = params.get("color", "black")
-
-            image      = self._get_image(image_index)
-            before_ids = {lyr.get_id() for lyr in image.get_layers()}
-            text_layer = None
-
+            image = self._get_image(int(params.get("image_index", 0)))
+            requested = str(params.get("font", "Sans"))
+            font = self._resolve_font(requested)
+            if font is None:
+                raise ValueError("Font could not be resolved: " + requested)
+            size = float(params.get("size", 24))
+            if not math.isfinite(size) or size <= 0:
+                raise ValueError("Text size must be finite and positive")
+            x, y = int(params.get("x", 0)), int(params.get("y", 0))
             image.undo_group_start()
-            Gimp.context_push()
             try:
-                Gimp.context_set_foreground(Gegl.Color.new(color_str))
-                font_obj = self._resolve_font(font)
-                if font_obj is not None:
-                    text_layer = self._create_text_layer_native(
-                        image, text_str, font_obj, size, x, y, color_str)
-                    if text_layer is None:
-                        self._create_text_layer_pdb(
-                            image, text_str, font_obj, size, x, y)
+                layer = self._create_text_layer_native(image, str(params.get("text", "")),
+                    font, size, x, y, params.get("color", "black"))
             finally:
-                Gimp.context_pop()
                 image.undo_group_end()
             Gimp.displays_flush()
-
-            if text_layer is None:
-                text_layer = self._find_new_layer(image, before_ids)
-            if text_layer is None:
-                # Issue #15: return an explicit error instead of a placeholder
-                # success so clients never chain ops on a fake handle.
-                return {
-                    "status": "error",
-                    "error":  "add_text: no text layer was created (no PDB procedure succeeded)",
-                }
-
-            return {
-                "status": "success",
-                "results": {
-                    "layer_name":  text_layer.get_name(),
-                    "layer_id":    text_layer.get_id(),
-                    "text_width":  text_layer.get_width(),
-                    "text_height": text_layer.get_height(),
-                    "position":    [x, y],
-                }
-            }
+            return {"status": "success", "results": {
+                "layer_name": layer.get_name(), "layer_id": layer.get_id(),
+                "text_width": layer.get_width(), "text_height": layer.get_height(),
+                "position": [x, y], "native_class": type(layer).__name__,
+                "actual": self._text_state(layer), "font_resolution": {
+                    "requested": requested, "resolved": font.get_name(),
+                    "fallback_used": requested.casefold() != font.get_name().casefold()}}}
         except Exception as e:
-            return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+            result = {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+            if hasattr(e, "readback_mismatch"):
+                result["readback_mismatch"] = e.readback_mismatch
+            return result
 
     def _edit_text(self, params):
-        """Edit an existing text layer."""
+        """Edit native text and verify each requested property's observed value."""
+        layer = None
         try:
-            from gi.repository import Gegl
-            image_index = int(params.get("image_index", 0))
-            layer_name  = params.get("layer_name", "")
-            new_text    = params.get("text", None)
-            new_font    = params.get("font", None)
-            new_size    = params.get("size", None)
-            new_color   = params.get("color", None)
-            image    = self._get_image(image_index)
-            layer    = self._resolve_layer(image, layer_name, None)
-            pdb      = Gimp.get_pdb()
+            image = self._get_image(int(params.get("image_index", 0)))
+            layer = self._resolve_layer(image, params.get("layer_name", ""), None)
+            if not isinstance(layer, Gimp.TextLayer):
+                raise ValueError("Target is not a native Gimp.TextLayer; raster text cannot be edited semantically")
+            if not any(params.get(key) is not None for key in ("text", "font", "size", "color")):
+                raise ValueError("No text properties were requested")
             image.undo_group_start()
             try:
-                if new_text is not None:
-                    proc = pdb.lookup_procedure("gimp-text-layer-set-text")
-                    if proc:
-                        cfg = proc.create_config()
-                        cfg.set_property("layer", layer)
-                        cfg.set_property("text",  new_text)
-                        proc.run(cfg)
-                if new_font is not None:
-                    proc = pdb.lookup_procedure("gimp-text-layer-set-font")
-                    if proc:
-                        cfg = proc.create_config()
-                        cfg.set_property("layer", layer)
-                        cfg.set_property("font",  new_font)
-                        proc.run(cfg)
-                if new_size is not None:
-                    proc = pdb.lookup_procedure("gimp-text-layer-set-font-size")
-                    if proc:
-                        cfg = proc.create_config()
-                        cfg.set_property("layer",     layer)
-                        cfg.set_property("font-size", float(new_size))
-                        cfg.set_property("unit",      Gimp.Unit.PIXEL)
-                        proc.run(cfg)
-                if new_color is not None:
-                    proc = pdb.lookup_procedure("gimp-text-layer-set-color")
-                    if proc:
-                        cfg = proc.create_config()
-                        cfg.set_property("layer", layer)
-                        cfg.set_property("color", Gegl.Color.new(new_color))
-                        proc.run(cfg)
+                verified = self._apply_native_text(layer, params)
             finally:
                 image.undo_group_end()
             Gimp.displays_flush()
-            return {"status": "success", "results": {"status": "success"}}
+            return {"status": "success", "results": {
+                "status": "success", "layer_name": layer.get_name(),
+                "layer_id": layer.get_id(), **verified}}
         except Exception as e:
-            return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+            result = {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+            if layer is not None and isinstance(layer, Gimp.TextLayer):
+                result["partial_changes_possible"] = True
+                try:
+                    result["actual"] = self._text_state(layer)
+                except Exception as exc:
+                    result["readback_error"] = str(exc)
+            return result
 
     def _warp_region(self, params):
         """Warp / liquify a region of pixels to deform facial features.
@@ -4041,10 +4135,15 @@ class MCPPlugin(Gimp.PlugIn):
         type_name = self._pdb_value_type_name(spec).lower()
         expected = {
             "image": "image", "item": "item", "layer": "layer",
-            "drawable": "drawable", "channel": "channel", "vectors": "vectors",
+            "drawable": "drawable", "channel": "channel", "mask": "layermask",
+            "path": "path", "vectors": "path",
         }
         is_object_array = "array" in type_name or "coreobject" in type_name
-        if kind not in expected or (expected[kind] not in type_name and not is_object_array):
+        compatible = (kind in expected and (expected[kind] in type_name
+                      or (kind == "vectors" and "vectors" in type_name)
+                      or (kind == "mask" and any(t in type_name for t in ("channel", "drawable", "item")))
+                      or (kind in ("layer", "path", "vectors") and "item" in type_name)))
+        if not compatible and not (kind in expected and is_object_array):
             raise ValueError(f"Reference {kind!r} does not match argument type {type_name!r}")
         if kind == "image":
             images = list(Gimp.get_images())
@@ -4052,7 +4151,7 @@ class MCPPlugin(Gimp.PlugIn):
                 raise IndexError(f"Image reference index {index} is out of range")
             return images[index]
         image = self._get_image(image_index)
-        if kind == "layer":
+        if kind in ("layer", "mask"):
             objects = list(image.get_layers())
             pending = list(objects)
             while pending:
@@ -4060,9 +4159,17 @@ class MCPPlugin(Gimp.PlugIn):
                 children = list(current.get_children()) if hasattr(current, "get_children") else []
                 objects.extend(children)
                 pending.extend(children)
+            if kind == "mask":
+                # index identifies the flattened owning layer, not a silently filtered list.
+                if index >= len(objects):
+                    raise IndexError(f"Mask owner layer index {index} is out of range")
+                mask = objects[index].get_mask()
+                if mask is None:
+                    raise ValueError(f"Layer at index {index} has no mask")
+                return mask
         elif kind == "channel":
             objects = list(image.get_channels())
-        elif kind == "vectors":
+        elif kind in ("vectors", "path"):
             objects = list(image.get_paths())
         else:
             objects = list(image.get_selected_drawables())
@@ -4074,6 +4181,15 @@ class MCPPlugin(Gimp.PlugIn):
     def _pdb_input_value(spec, value):
         """Coerce portable JSON values to common GObject enum/color argument types."""
         type_name = MCPPlugin._pdb_value_type_name(spec).lower()
+        if type_name in ("gfile", "giofile"):
+            if isinstance(value, dict) and "$file" in value:
+                value = value["$file"]
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("GFile arguments require a local path string or {$file: local path}")
+            if "://" in value:
+                raise ValueError("GFile arguments support local files only")
+            from gi.repository import Gio
+            return Gio.File.new_for_path(os.path.abspath(value))
         candidates = MCPPlugin._pdb_enum_members(spec)
         if candidates and isinstance(value, str):
             wanted = value.casefold().replace("_", "-")

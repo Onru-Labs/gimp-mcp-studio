@@ -59,7 +59,7 @@ class GimpConnection:
             # Layered exports can legitimately take longer than the connection
             # probe. Preserve the in-flight operation instead of timing out at
             # ten seconds and immediately sending cleanup into the exporter.
-            slow = command_type in ('export_image', 'save_xcf', 'batch_export', 'open_image', 'get_image_bitmap')
+            slow = command_type in ('export_image', 'save_xcf', 'batch_export', 'open_image', 'import_layer', 'get_image_bitmap')
             timeout = float(os.getenv('GIMP_MCP_OPERATION_TIMEOUT', '120' if slow else '10'))
             self.sock.settimeout(max(1, min(timeout, 600)))
             self.sock.sendall(json.dumps(command).encode('utf-8') + b'\n')
@@ -1480,6 +1480,23 @@ def create_layer(
     except Exception as e:
         traceback.print_exc()
         raise Exception(f"create_layer failed: {e}")
+
+
+@mcp.tool()
+def import_layer(ctx: Context, file_path: str, image_index: int = 0,
+                 name: str | None = None, x: int = 0, y: int = 0, position: int = 0) -> dict:
+    """Import an existing local asset as a layer into the owned, already open image.
+
+    Preserves the file's pixels/alpha and native dimensions. x/y are exact canvas
+    pixel offsets; position is the top-to-bottom insertion index (0 means top).
+    Does not open another image. Returns actual layer ID, name, bounds and image ID.
+    """
+    result = get_gimp_connection().send_command("import_layer", {
+        "file_path": file_path, "image_index": image_index, "name": name,
+        "x": x, "y": y, "position": position})
+    if result.get("status") != "success":
+        raise RuntimeError("import_layer failed: " + str(result.get("error", "Unknown error")))
+    return result["results"]
 
 
 @mcp.tool()
