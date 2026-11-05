@@ -6,6 +6,6 @@ in the source is retained. LICENSE contains the GNU GPL version 3 text.
 Modifications made in this workspace, 2026-11-05, include MCP Python SDK 2
 support, persistent GIMP service lifecycle, main-thread API dispatch,
 noninteractive GIMP 3 export, file-operation timeouts, typed PDB discovery
-and execution, GEGL filter discovery, and named-layer transformations.
+and execution, GEGL filter discovery, named-layer transformations, and owned-image full-composite/detail snapshots.
 
 This fork is not an official GIMP or Model Context Protocol project.

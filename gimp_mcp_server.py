@@ -59,7 +59,7 @@ class GimpConnection:
             # Layered exports can legitimately take longer than the connection
             # probe. Preserve the in-flight operation instead of timing out at
             # ten seconds and immediately sending cleanup into the exporter.
-            slow = command_type in ('export_image', 'save_xcf', 'batch_export', 'open_image')
+            slow = command_type in ('export_image', 'save_xcf', 'batch_export', 'open_image', 'get_image_bitmap')
             timeout = float(os.getenv('GIMP_MCP_OPERATION_TIMEOUT', '120' if slow else '10'))
             self.sock.settimeout(max(1, min(timeout, 600)))
             self.sock.sendall(json.dumps(command).encode('utf-8') + b'\n')

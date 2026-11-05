@@ -4,7 +4,7 @@ GIMP MCP Studio contains a GIMP 3 plug-in and MCP server, distributed as the sta
 
 This is a modified fork of [gimp-mcp/gimp-mcp](https://github.com/gimp-mcp/gimp-mcp), distributed under GPL-3.0 with original source attribution retained. See `LICENSE` and `NOTICE`.
 
-From this directory, install with `python -m pip install .` and launch the stdio server with `gimp-mcp-studio`. The wheel includes the companion plug-in, PowerShell installer, and batch-start script under the environment's `share/gimp-mcp-studio` directory. GIMP itself is installed separately. Run `python -m unittest discover -s tests -v` for protocol and SDK 2 registry checks; these do not substitute for live GIMP editing verification.
+From this directory, install with `python -m pip install .` and launch the stdio server with `gimp-mcp-studio`. The wheel includes the companion plug-in, PowerShell installer, and batch-start script under the environment's `share/gimp-mcp-studio` directory. GIMP itself is installed separately. For tests, install `python -m pip install ".[test]"` then run `python -m unittest discover -s tests -v`; these do not substitute for live GIMP editing verification.
 
 The server exposes **88 named MCP tools** in `gimp_mcp_server.py`. That number describes the fixed convenience tools; the live GIMP Procedure Database (PDB) and GEGL registries add operations discovered from the running GIMP installation. The bridge does not claim that every GIMP UI action or third-party plug-in is callable through the PDB.
 
@@ -68,6 +68,8 @@ A separate read-only SDK 2 stdio probe of the running GIMP 3.2.6 instance on 202
 
 A subsequent isolated GIMP 3.2.6 helper regression probe verified that native GEGL configuration is applied and updated before merging: the sharpen fixture produced a nonzero pixel change, while an invalid blur radius and an unknown property returned explicit errors. Seven local checks include validation of requested properties, clamped values, merge-error propagation, and the SDK 2 stdio registry. This confirms the exercised helper paths only; it does not extend coverage to every installed GEGL filter.
 
+An isolated GIMP 3.2.6 snapshot regression session subsequently captured 24 actual full/detail views while exercising native object handles, checkpoint edits and restoration. Snapshots now duplicate the explicitly selected image, render its full composite, crop/scale that owned scratch image, and delete it; they no longer select a top layer through the global clipboard. Native alpha-preserving thumbnails cover sizes up to 1024 pixels, with PNG export for larger snapshots. The source ORA remained unchanged. Four new snapshot tests bring the local suite to eleven checks; this probe did not exercise every MCP tool.
+
 Export and geometry checks alone do not establish visual quality or product identity. Inspect the artwork before release; an unreviewed output is not an approved result.
 
 Useful entry points:
@@ -78,4 +80,4 @@ Useful entry points:
 
 ## Upstream status
 
-This directory has package metadata, a GPL license and attribution notice, protocol/registry checks, and a CI workflow intended for a standalone checkout. The standalone source is published at [Onru-Labs/gimp-mcp-studio](https://github.com/Onru-Labs/gimp-mcp-studio). Seven local unit/protocol/helper checks pass on Python 3.13, and the standalone [Python 3.11/3.13 Linux CI matrix passed](https://github.com/Onru-Labs/gimp-mcp-studio/actions/runs/42007858113). The checks cover connection handling, file-operation timeouts, and tool registration; full MCP protocol conformance and every live GIMP operation remain unverified. Publication makes the source available; it does not establish upstream acceptance or full GIMP capability coverage.
+This directory has package metadata, a GPL license and attribution notice, protocol/registry checks, and a CI workflow intended for a standalone checkout. The standalone source is published at [Onru-Labs/gimp-mcp-studio](https://github.com/Onru-Labs/gimp-mcp-studio). Eleven local unit/protocol/helper/snapshot checks pass on Python 3.13, and the standalone [Python 3.11/3.13 Linux CI matrix passed](https://github.com/Onru-Labs/gimp-mcp-studio/actions/runs/42007858113). The checks cover connection handling, file-operation timeouts, and tool registration; full MCP protocol conformance and every live GIMP operation remain unverified. Publication makes the source available; it does not establish upstream acceptance or full GIMP capability coverage.
