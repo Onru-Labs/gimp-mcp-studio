@@ -3150,6 +3150,7 @@ class MCPPlugin(Gimp.PlugIn):
         return {"text": layer.get_text(), "font": layer.get_font().get_name(),
                 "size": float(font_size), "unit_id": unit.get_id(),
                 "color_rgba": list(layer.get_color().get_rgba()),
+                "color_encoding": "linear-sRGB", "alpha_mode": "straight",
                 "position": self._text_offsets(layer)}
 
     def _apply_native_text(self, layer, params):
@@ -4360,17 +4361,16 @@ class MCPPlugin(Gimp.PlugIn):
             image    = self._get_image(image_index)
             drawable = self._resolve_layer(image, layer_name, None)
             pixel    = drawable.get_pixel(x, y)
-            # GIMP 3.2: get_pixel returns a Gegl.Color object
-            if hasattr(pixel, 'get_rgba'):
-                rf, gf, bf, af = pixel.get_rgba()
-                r, g, b, a = int(rf*255), int(gf*255), int(bf*255), int(af*255)
-            else:
-                # Fallback: old tuple format (num_channels, bytes_array)
-                channels = list(pixel[1]) if hasattr(pixel[1], '__iter__') else []
-                r = channels[0] if len(channels) > 0 else 0
-                g = channels[1] if len(channels) > 1 else 0
-                b = channels[2] if len(channels) > 2 else 0
-                a = channels[3] if len(channels) > 3 else 255
+            # Hex/RGB contracts describe encoded sRGB, not linear-light get_rgba().
+            # Babl converts the source profile/TRC and preserves separate alpha.
+            from gi.repository import Babl
+            if pixel is None or not hasattr(pixel, "get_bytes"):
+                raise RuntimeError("Pixel does not support typed GEGL color conversion")
+            raw = pixel.get_bytes(Babl.format("R'G'B'A u8"))
+            channels = bytes(raw.get_data())
+            if len(channels) != 4:
+                raise RuntimeError("Expected four encoded sRGB RGBA bytes, got " + str(len(channels)))
+            r, g, b, a = channels
             color_hex = f"#{r:02x}{g:02x}{b:02x}"
             return {
                 "status": "success",
@@ -4378,6 +4378,9 @@ class MCPPlugin(Gimp.PlugIn):
                     "color_hex": color_hex,
                     "color_rgb": [r, g, b],
                     "alpha":     a,
+                    "color_space": "sRGB",
+                    "color_encoding": "R'G'B'A u8",
+                    "alpha_mode": "straight",
                 }
             }
         except Exception as e:
